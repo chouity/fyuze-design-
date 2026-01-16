@@ -1,0 +1,8 @@
+search_engine package compiled to bytecode
+Optimize level: 2
+
+Files:
+  - __init__.pyc
+  - _url_parser.pyc
+  - search_engine.pyc
+  - search_engine_v2.pyc

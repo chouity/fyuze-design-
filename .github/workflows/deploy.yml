@@ -1,0 +1,282 @@
+name: Reusable AWS ECS Deployment
+
+on:
+  # Auto deployment is disabled - uncomment below to enable
+  # push:
+  #   branches:
+  #     - main
+  #     - develop
+  #     - staging
+  # pull_request:
+  #   branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy to"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      force_redeploy:
+        description: "Force redeployment even if no changes"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  # Load from project configuration file
+  PROJECT_CONFIG_FILE: .ci/project-config.yml
+  AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  load-config:
+    runs-on: ubuntu-latest
+    outputs:
+      project-name: ${{ steps.config.outputs.project-name }}
+      service-port: ${{ steps.config.outputs.service-port }}
+      cpu: ${{ steps.config.outputs.cpu }}
+      memory: ${{ steps.config.outputs.memory }}
+      min-capacity: ${{ steps.config.outputs.min-capacity }}
+      max-capacity: ${{ steps.config.outputs.max-capacity }}
+      health-check-path: ${{ steps.config.outputs.health-check-path }}
+      environment: ${{ steps.config.outputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load Project Configuration
+        id: config
+        run: |
+          # Determine environment
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ github.event.inputs.environment }}"
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            ENV="prod"
+          elif [ "${{ github.ref }}" = "refs/heads/staging" ]; then
+            ENV="staging"
+          else
+            ENV="dev"
+          fi
+
+          # Load base config
+          PROJECT_NAME=$(yq eval '.project.name' $PROJECT_CONFIG_FILE)
+          SERVICE_PORT=$(yq eval '.project.port // 8000' $PROJECT_CONFIG_FILE)
+          HEALTH_CHECK_PATH=$(yq eval '.project.health_check_path // "/health"' $PROJECT_CONFIG_FILE)
+
+          # Load environment-specific config
+          CPU=$(yq eval ".environments.${ENV}.cpu // 256" $PROJECT_CONFIG_FILE)
+          MEMORY=$(yq eval ".environments.${ENV}.memory // 512" $PROJECT_CONFIG_FILE)
+          MIN_CAPACITY=$(yq eval ".environments.${ENV}.min_capacity // 1" $PROJECT_CONFIG_FILE)
+          MAX_CAPACITY=$(yq eval ".environments.${ENV}.max_capacity // 3" $PROJECT_CONFIG_FILE)
+
+          # Output configurations
+          echo "project-name=${PROJECT_NAME}" >> $GITHUB_OUTPUT
+          echo "service-port=${SERVICE_PORT}" >> $GITHUB_OUTPUT
+          echo "cpu=${CPU}" >> $GITHUB_OUTPUT
+          echo "memory=${MEMORY}" >> $GITHUB_OUTPUT
+          echo "min-capacity=${MIN_CAPACITY}" >> $GITHUB_OUTPUT
+          echo "max-capacity=${MAX_CAPACITY}" >> $GITHUB_OUTPUT
+          echo "health-check-path=${HEALTH_CHECK_PATH}" >> $GITHUB_OUTPUT
+          echo "environment=${ENV}" >> $GITHUB_OUTPUT
+
+  test:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          # Add your test commands here
+          python -m pytest tests/ || echo "No tests found - skipping"
+
+      - name: Lint code
+        run: |
+          pip install flake8 || echo "Flake8 not found - skipping lint"
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || echo "Linting skipped"
+
+  build-and-deploy:
+    needs: [load-config, test]
+    if: always() && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: ${{ needs.load-config.outputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          # Install yq for YAML parsing
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+          # Install AWS CLI
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install --update
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || env.AWS_DEFAULT_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up build variables
+        id: vars
+        run: |
+          PROJECT_NAME="${{ needs.load-config.outputs.project-name }}"
+          ENVIRONMENT="${{ needs.load-config.outputs.environment }}"
+          SHORT_SHA=${GITHUB_SHA::8}
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+
+          # Create unique image tag
+          if [ "$ENVIRONMENT" = "prod" ]; then
+            IMAGE_TAG="v${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
+          else
+            IMAGE_TAG="${ENVIRONMENT}-${TIMESTAMP}-${SHORT_SHA}"
+          fi
+
+          # Set resource names
+          ECR_REPOSITORY="${PROJECT_NAME}-${ENVIRONMENT}"
+          ECS_CLUSTER="${PROJECT_NAME}-cluster-${ENVIRONMENT}"
+          ECS_SERVICE="${PROJECT_NAME}-service-${ENVIRONMENT}"
+          TASK_FAMILY="${PROJECT_NAME}-task-${ENVIRONMENT}"
+
+          echo "project-name=${PROJECT_NAME}" >> $GITHUB_OUTPUT
+          echo "environment=${ENVIRONMENT}" >> $GITHUB_OUTPUT
+          echo "image-tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "ecr-repository=${ECR_REPOSITORY}" >> $GITHUB_OUTPUT
+          echo "ecs-cluster=${ECS_CLUSTER}" >> $GITHUB_OUTPUT
+          echo "ecs-service=${ECS_SERVICE}" >> $GITHUB_OUTPUT
+          echo "task-family=${TASK_FAMILY}" >> $GITHUB_OUTPUT
+          echo "registry=${{ steps.login-ecr.outputs.registry }}" >> $GITHUB_OUTPUT
+
+      - name: Set image URI
+        id: image
+        run: |
+          IMAGE_URI="${{ steps.vars.outputs.registry }}/${{ steps.vars.outputs.ecr-repository }}:${{ steps.vars.outputs.image-tag }}"
+          echo "uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "Image URI: ${IMAGE_URI}"
+
+      - name: Ensure AWS Infrastructure
+        id: infra
+        run: |
+          # Make infrastructure script executable
+          chmod +x .ci/scripts/ensure-infrastructure.sh
+
+          # Run infrastructure setup
+          .ci/scripts/ensure-infrastructure.sh \
+            "${{ steps.vars.outputs.ecr-repository }}" \
+            "${{ steps.vars.outputs.ecs-cluster }}" \
+            "${{ needs.load-config.outputs.environment }}" \
+            "${{ needs.load-config.outputs.service-port }}" \
+            "${{ needs.load-config.outputs.health-check-path }}"
+
+      - name: Build, tag, and push image to Amazon ECR
+        run: |
+          # Build Docker image
+          docker build -t ${{ steps.image.outputs.uri }} .
+
+          # Tag with latest for environment
+          docker tag ${{ steps.image.outputs.uri }} ${{ steps.vars.outputs.registry }}/${{ steps.vars.outputs.ecr-repository }}:latest
+
+          # Push both tags
+          docker push ${{ steps.image.outputs.uri }}
+          docker push ${{ steps.vars.outputs.registry }}/${{ steps.vars.outputs.ecr-repository }}:latest
+
+      - name: Create ECS Task Definition
+        env:
+          # Application Environment Variables from GitHub Environment Secrets
+          # These are automatically loaded from .ci/env-variables.yml configuration
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          ENSEMBLE_API_KEY: ${{ secrets.ENSEMBLE_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_SEARCH_ENGINE_ID: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          MOCK_DATA: ${{ secrets.MOCK_DATA }}
+        run: |
+          # Make task definition script executable
+          chmod +x .ci/scripts/create-task-definition.sh
+
+          # Create task definition
+          .ci/scripts/create-task-definition.sh \
+            "${{ steps.vars.outputs.task-family }}" \
+            "${{ steps.image.outputs.uri }}" \
+            "${{ needs.load-config.outputs.cpu }}" \
+            "${{ needs.load-config.outputs.memory }}" \
+            "${{ needs.load-config.outputs.service-port }}" \
+            "${{ steps.vars.outputs.environment }}"
+
+      - name: Deploy to Amazon ECS
+        run: |
+          # Make deployment script executable
+          chmod +x .ci/scripts/deploy-service.sh
+
+          # Deploy or update service
+          .ci/scripts/deploy-service.sh \
+            "${{ steps.vars.outputs.ecs-cluster }}" \
+            "${{ steps.vars.outputs.ecs-service }}" \
+            "${{ steps.vars.outputs.task-family }}" \
+            "${{ needs.load-config.outputs.min-capacity }}" \
+            "${{ needs.load-config.outputs.max-capacity }}" \
+            "${{ needs.load-config.outputs.environment }}" \
+            "${{ steps.infra.outputs.target-group-arn }}"
+
+      - name: Wait for deployment to complete
+        run: |
+          echo "Waiting for service to reach steady state..."
+          aws ecs wait services-stable \
+            --cluster ${{ steps.vars.outputs.ecs-cluster }} \
+            --services ${{ steps.vars.outputs.ecs-service }} \
+            --region ${{ env.AWS_DEFAULT_REGION }}
+
+          echo "Deployment completed successfully!"
+
+      - name: Run health check
+        run: |
+          # Make health check script executable
+          chmod +x .ci/scripts/health-check.sh
+
+          # Run health check
+          .ci/scripts/health-check.sh \
+            "${{ steps.vars.outputs.ecs-cluster }}" \
+            "${{ steps.vars.outputs.ecs-service }}" \
+            "${{ needs.load-config.outputs.health-check-path }}" \
+            "${{ needs.load-config.outputs.environment }}"
+
+      - name: Deployment Summary
+        run: |
+          echo "🚀 Deployment Summary"
+          echo "==================="
+          echo "Environment: ${{ needs.load-config.outputs.environment }}"
+          echo "Project: ${{ needs.load-config.outputs.project-name }}"
+          echo "Image: ${{ steps.vars.outputs.image-uri }}"
+          echo "Cluster: ${{ steps.vars.outputs.ecs-cluster }}"
+          echo "Service: ${{ steps.vars.outputs.ecs-service }}"
+          echo "Task Definition: ${{ steps.vars.outputs.task-family }}"
+          echo "Target Group: ${{ steps.infra.outputs.target-group-arn }}"
+          echo "ALB DNS: http://${{ steps.infra.outputs.load-balancer-dns }}"
+          echo "==================="

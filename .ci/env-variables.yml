@@ -1,0 +1,24 @@
+# Application Environment Variables Configuration
+# These are the application-specific variables that will be passed to ECS task definitions
+# Add or remove variables as needed based on your application requirements
+
+variables:
+  # AWS Credentials (Application-specific)
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+  
+  # API Keys and External Services
+  - ENSEMBLE_API_KEY
+  - EXA_API_KEY
+  - GOOGLE_API_KEY
+  - GOOGLE_SEARCH_ENGINE_ID
+  - GROQ_API_KEY
+  
+  # Database Configuration
+  - MONGODB_URI
+  - SUPABASE_URL
+  - SUPABASE_SERVICE_ROLE_KEY
+  - SUPABASE_ANON_KEY
+  
+  # Mock/Test Mode
+  - MOCK_DATA

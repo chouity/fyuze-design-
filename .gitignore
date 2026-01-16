@@ -1,0 +1,12 @@
+.venv
+__pycache__
+build
+.env
+build_lambda.ps1
+deployment.zip
+output
+*.ipynb
+logs
+output/
+exp/
+.ci/environments/

@@ -1,0 +1,88 @@
+# Project Configuration
+# This file defines project-specific settings for CI/CD deployment
+# Copy this file to your project root and customize the values
+
+project:
+  # Project name (used for resource naming)
+  name: "fyuze-app"
+  
+  # Port your application runs on
+  port: 8000
+  
+  # Health check endpoint path
+  health_check_path: "/health"
+  
+  # Docker build context (default: current directory)
+  build_context: "."
+  
+  # Dockerfile path (relative to build context)
+  dockerfile: "Dockerfile"
+
+# Environment-specific configurations
+environments:
+  # Development environment
+  dev:
+    cpu: 1024        # CPU units (256 = 0.25 vCPU)
+    memory: 4096     # Memory in MB
+    max_capacity: 1  # Maximum number of tasks
+    
+  # Staging environment  
+  staging:
+    cpu: 512        # CPU units (512 = 0.5 vCPU)
+    memory: 1024    # Memory in MB
+    min_capacity: 1 # Minimum number of tasks
+    max_capacity: 3 # Maximum number of tasks
+    
+  # Production environment
+  prod:
+    cpu: 1024       # CPU units (1024 = 1 vCPU)
+    memory: 4096    # Memory in MB
+    min_capacity: 1 # Minimum number of tasks
+    max_capacity: 2 # Maximum number of tasks
+
+# AWS Configuration (optional - can use GitHub secrets instead)
+aws:
+  # AWS region (can be overridden by GitHub variable AWS_REGION)
+  region: "eu-west-1"
+  
+  # ECR repository settings
+  ecr:
+    # Enable image scanning
+    scan_on_push: true
+    
+    # Lifecycle policy - keep last N images
+    keep_last_images: 10
+
+# Build Configuration
+build:
+  # Build arguments to pass to Docker
+  build_args: []
+    # - "ENV=production"
+    # - "VERSION=${GITHUB_SHA}"
+  
+  # Build targets (for multi-stage builds)
+  target: ""
+  
+  # Additional Docker build options
+  options: []
+    # - "--no-cache"
+    # - "--pull"
+
+# Deployment Configuration
+deployment:
+  # Health check configuration
+  health_check:
+    # Number of retry attempts
+    max_attempts: 5
+    
+    # Interval between attempts (seconds)
+    interval: 15
+    
+    # Timeout for each attempt (seconds)
+    timeout: 20
+  
+  # Deployment timeout (seconds)
+  timeout: 600
+  
+  # Auto-rollback on failure
+  auto_rollback: true
